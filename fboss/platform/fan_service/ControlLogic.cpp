@@ -6,10 +6,8 @@
 #include "fboss/platform/fan_service/ControlLogic.h"
 
 #include <folly/logging/xlog.h>
-#include <gpiod.h>
 
 #include "common/time/Time.h"
-#include "fboss/lib/GpiodLine.h"
 #include "fboss/platform/fan_service/SensorData.h"
 #include "fboss/platform/fan_service/if/gen-cpp2/fan_service_config_constants.h"
 #include "fboss/platform/fan_service/if/gen-cpp2/fan_service_config_types.h"
@@ -179,7 +177,9 @@ void ControlLogic::updateTargetPwm(const Sensor& sensor) {
   if (pwmCalcType == constants::SENSOR_PWM_CALC_TYPE_FOUR_LINEAR_TABLE()) {
     float previousSensorValue = readCache.processedReadValue;
     float sensorValue = readCache.lastReadValue;
-    bool deadFanExists = (numFanFailed_ > 0);
+    bool deadFanExists =
+        ((numFanFailed_ > 0) &&
+         (numFanFailed_ < *config_.pwmBoostOnNumDeadFan()));
     bool accelerate =
         ((previousSensorValue == 0) || (sensorValue > previousSensorValue));
     if (accelerate && !deadFanExists) {
@@ -351,37 +351,15 @@ void ControlLogic::getOpticsUpdate() {
 bool ControlLogic::isFanPresentInDevice(const Fan& fan) {
   unsigned int readVal;
   bool readSuccessful = false;
-  bool fanPresent = false;
-  if (fan.presenceSysfsPath()) {
-    try {
-      readVal =
-          static_cast<unsigned>(pBsp_->readSysfs(*fan.presenceSysfsPath()));
-      readSuccessful = true;
-    } catch (std::exception&) {
-      XLOG(ERR) << "Failed to read sysfs " << *fan.presenceSysfsPath();
-    }
-    fanPresent = (readSuccessful && readVal == *fan.fanPresentVal());
-    if (fanPresent) {
-      XLOG(INFO) << fmt::format(
-          "{}: is present in the host (through sysfs)", *fan.fanName());
-    } else {
-      XLOG(INFO) << fmt::format(
-          "{}: is absent in the host (through sysfs)", *fan.fanName());
-    }
-  } else if (fan.presenceGpio()) {
-    struct gpiod_chip* chip =
-        gpiod_chip_open(fan.presenceGpio()->path()->c_str());
-    GpiodLine line(chip, *fan.presenceGpio()->lineIndex(), "gpioline");
-    int16_t value = line.getValue();
-    gpiod_chip_close(chip);
-    if (value == *fan.presenceGpio()->desiredValue()) {
-      fanPresent = true;
-      XLOG(INFO) << fmt::format(
-          "{}: is present in the host (through gpio)", *fan.fanName());
-    } else {
-      XLOG(INFO) << fmt::format(
-          "{}: is absent in the host (through gpio)", *fan.fanName());
-    }
+  try {
+    readVal = static_cast<unsigned>(pBsp_->readSysfs(*fan.presenceSysfsPath()));
+    readSuccessful = true;
+  } catch (std::exception&) {
+    XLOG(ERR) << "Failed to read sysfs " << *fan.presenceSysfsPath();
+  }
+  auto fanPresent = (readSuccessful && readVal == *fan.fanPresentVal());
+  if (!fanPresent) {
+    XLOG(INFO) << fmt::format("{}: is absent in the host", *fan.fanName());
   }
   fb303::fbData->setCounter(
       fmt::format(kFanAbsent, *fan.fanName()), !fanPresent);
@@ -567,15 +545,7 @@ void ControlLogic::updateControl(std::shared_ptr<SensorData> pS) {
     pBsp_->getSensorData(pSensor_);
   }
 
-  // STEP 1: Read sensor values and calculate their PWM
-  XLOG(INFO) << "Processing Sensors ...";
-  getSensorUpdate();
-
-  // STEP 2: Read optics values and calculate their PWM
-  XLOG(INFO) << "Processing Optics ...";
-  getOpticsUpdate();
-
-  // STEP 3: Check presence/rpm of fans
+  // STEP 1: Check presence/rpm of fans
   XLOG(INFO) << "Processing Fans ...";
   fanStatuses_.withWLock([&](auto& fanStatuses) {
     // Update fan status with new rpm and timestamp.
@@ -620,6 +590,14 @@ void ControlLogic::updateControl(std::shared_ptr<SensorData> pS) {
       fanStatuses[*fan.fanName()].fanFailed() = fanFailed;
     }
   });
+
+  // STEP 2: Read sensor values and calculate their PWM
+  XLOG(INFO) << "Processing Sensors ...";
+  getSensorUpdate();
+
+  // STEP 3: Read optics values and calculate their PWM
+  XLOG(INFO) << "Processing Optics ...";
+  getOpticsUpdate();
 
   // STEP 4: Determine whether boost mode is necessary
   uint64_t secondsSinceLastOpticsUpdate =
