@@ -425,8 +425,7 @@ std::pair<bool, int16_t> ControlLogic::programFan(
   }
 
   int pwmRawValue =
-      (int)(((*fan.pwmMax()) - (*fan.pwmMin())) * newFanPwm / 100.0 +
-            *fan.pwmMin());
+      (int)(((*fan.pwmMax()) - (*fan.pwmMin())) * newFanPwm / 100.0 + *fan.pwmMin());
   if (pwmRawValue < *fan.pwmMin()) {
     pwmRawValue = *fan.pwmMin();
   } else if (pwmRawValue > *fan.pwmMax()) {
@@ -567,15 +566,7 @@ void ControlLogic::updateControl(std::shared_ptr<SensorData> pS) {
     pBsp_->getSensorData(pSensor_);
   }
 
-  // STEP 1: Read sensor values and calculate their PWM
-  XLOG(INFO) << "Processing Sensors ...";
-  getSensorUpdate();
-
-  // STEP 2: Read optics values and calculate their PWM
-  XLOG(INFO) << "Processing Optics ...";
-  getOpticsUpdate();
-
-  // STEP 3: Check presence/rpm of fans
+  // STEP 1: Check presence/rpm of fans
   XLOG(INFO) << "Processing Fans ...";
   fanStatuses_.withWLock([&](auto& fanStatuses) {
     // Update fan status with new rpm and timestamp.
@@ -620,6 +611,14 @@ void ControlLogic::updateControl(std::shared_ptr<SensorData> pS) {
       fanStatuses[*fan.fanName()].fanFailed() = fanFailed;
     }
   });
+
+  // STEP 2: Read sensor values and calculate their PWM
+  XLOG(INFO) << "Processing Sensors ...";
+  getSensorUpdate();
+
+  // STEP 3: Read optics values and calculate their PWM
+  XLOG(INFO) << "Processing Optics ...";
+  getOpticsUpdate();
 
   // STEP 4: Determine whether boost mode is necessary
   uint64_t secondsSinceLastOpticsUpdate =
